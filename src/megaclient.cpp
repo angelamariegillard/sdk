@@ -540,9 +540,9 @@ Node *MegaClient::getrootnode(Node *node)
     return n;
 }
 
-bool MegaClient::isPrivateNode(handle h)
+bool MegaClient::isPrivateNode(NodeHandle h)
 {
-    Node *node = nodebyhandle(h);
+    Node *node = nodeByHandle(h);
     if (!node)
     {
         return false;
@@ -552,9 +552,9 @@ bool MegaClient::isPrivateNode(handle h)
     return (rootnode == rootnodes[0] || rootnode == rootnodes[1] || rootnode == rootnodes[2]);
 }
 
-bool MegaClient::isForeignNode(handle h)
+bool MegaClient::isForeignNode(NodeHandle h)
 {
-    Node *node = nodebyhandle(h);
+    Node *node = nodeByHandle(h);
     if (!node)
     {
         return false;
@@ -3577,7 +3577,7 @@ void MegaClient::dispatchTransfers()
                         if ((*it)->hprivate && !(*it)->hforeign)
                         {
                             // Make sure we have the size field
-                            Node* n = nodebyhandle((*it)->h);
+                            Node* n = nodeByHandle((*it)->h);
                             if (!n)
                             {
                                 missingPrivateNode = true;
@@ -3698,7 +3698,7 @@ void MegaClient::dispatchTransfers()
 
                 if (openfinished && openok)
                 {
-                    handle h = UNDEF;
+                    NodeHandle h;
                     bool hprivate = true;
                     const char *privauth = NULL;
                     const char *pubauth = NULL;
@@ -3772,7 +3772,7 @@ void MegaClient::dispatchTransfers()
                         for (file_list::iterator it = nexttransfer->files.begin();
                             it != nexttransfer->files.end(); it++)
                         {
-                            if (!(*it)->hprivate || (*it)->hforeign || nodebyhandle((*it)->h))
+                            if (!(*it)->hprivate || (*it)->hforeign || nodeByHandle((*it)->h))
                             {
                                 h = (*it)->h;
                                 hprivate = (*it)->hprivate;
@@ -3798,7 +3798,7 @@ void MegaClient::dispatchTransfers()
                     {
                         reqs.add((ts->pendingcmd = (nexttransfer->type == PUT)
                             ? (Command*)new CommandPutFile(this, ts, putmbpscap)
-                            : (Command*)new CommandGetFile(this, ts, NULL, h, hprivate, privauth, pubauth, chatauth)));
+                            : (Command*)new CommandGetFile(this, ts, NULL, h.as8byte(), hprivate, privauth, pubauth, chatauth)));
                     }
 
                     LOG_debug << "Activating transfer";
@@ -7217,6 +7217,12 @@ Node* MegaClient::nodebyhandle(handle h) const
     }
 
     return nullptr;
+}
+
+Node* MegaClient::nodeByHandle(NodeHandle h) const
+{
+    if (h.isUndef()) return nullptr;
+    return nodebyhandle(h.as8byte());
 }
 
 // server-client deletion
@@ -11418,6 +11424,7 @@ bool MegaClient::fetchsc(DbTable* sctable)
 
     LOG_info << "Loading session from local cache";
 
+    mCachedStatus.clear();
     sctable->rewind();
 
     bool hasNext = sctable->next(&id, &data, &key);
@@ -13184,7 +13191,7 @@ void MegaClient::ensureSyncUserAttributesCompleted(Error e)
     }
 }
 
-void MegaClient::copySyncConfig(const SyncConfig& config, SyncCompletionFunction completion)
+void MegaClient::copySyncConfig(const SyncConfig& config, std::function<void(handle, error)> completion)
 {
     string deviceIdHash = getDeviceidHash();
     string extraData; // Empty extra data for the moment, in the future, any should come in config
@@ -13195,29 +13202,26 @@ void MegaClient::copySyncConfig(const SyncConfig& config, SyncCompletionFunction
                                    , BackupInfoSync::getSyncState(config, this)
                                    , config.getError()
                                    , extraData
-                                   , [this, config, completion](Error e, handle backupId) mutable {
-        if (ISUNDEF(backupId) && !e)
+                                   , [this, config, completion](Error e, handle backupId) {
+        if (!e)
         {
-            e = API_EFAILED;
+            if (ISUNDEF(backupId))
+            {
+                e = API_EINTERNAL;
+            }
+            else
+            {
+                auto configWithId = config;
+                configWithId.mBackupId = backupId;
+                syncs.saveSyncConfig(configWithId);
+            }
         }
 
-        if (e)
-        {
-            completion(nullptr, config.getError(), e);
-        }
-        else
-        {
-            auto configWithId = config;
-            configWithId.mBackupId = backupId;
-            UnifiedSync *unifiedSync = syncs.appendNewSync(configWithId, *this);
-
-            completion(unifiedSync, unifiedSync->mConfig.getError(), e);
-        }
+        completion(backupId, e);
     }));
 }
 
-error MegaClient::addsync(SyncConfig& config, const char* debris, LocalPath* localdebris, bool delayInitialScan, bool notifyApp,
-                          SyncCompletionFunction completion)
+error MegaClient::addsync(SyncConfig& config, bool notifyApp, SyncCompletionFunction completion)
 {
     LocalPath rootpath;
     std::unique_ptr<FileAccess> openedLocalFolder;
@@ -13256,7 +13260,6 @@ error MegaClient::addsync(SyncConfig& config, const char* debris, LocalPath* loc
                 // if we got this far, the syncConfig is kept (in db and in memory)
                 config.setBackupId(backupId);
 
-                //TODO: remove BackupMonitor::updateOrRegisterSync "Register" code path and backupId control
                 UnifiedSync *unifiedSync = syncs.appendNewSync(config, *this);
 
                 e = unifiedSync->enableSync(false, notifyApp);
@@ -14263,7 +14266,7 @@ void MegaClient::syncupdate()
             {
                 if (l->parent->node)
                 {
-                    l->h = l->parent->node->nodehandle;
+                    l->h = l->parent->node->nodeHandle();
                 }
 
                 l->previousNode = l->node;
@@ -14960,8 +14963,8 @@ bool MegaClient::startxfer(direction_t d, File* f, DBTableTransactionCommitter& 
             }
         }
 
-        assert( (ISUNDEF(f->h) && f->targetuser.size() && (f->targetuser.size() == 11 || f->targetuser.find("@")!=string::npos) ) // <- uploading to inbox
-                || (!ISUNDEF(f->h) && (nodebyhandle(f->h) || d == GET) )); // target handle for the upload should be known at this time (except for inbox uploads)
+        assert( (f->h.isUndef() && f->targetuser.size() && (f->targetuser.size() == 11 || f->targetuser.find("@")!=string::npos) ) // <- uploading to inbox
+                || (!f->h.isUndef() && (nodeByHandle(f->h) || d == GET) )); // target handle for the upload should be known at this time (except for inbox uploads)
     }
 
     return true;
