@@ -2366,7 +2366,14 @@ void MegaClient::exec()
         // verify filesystem fingerprints, disable deviating syncs
         // (this covers mountovers, some device removals and some failures)
         syncs.forEachRunningSync([&](Sync* sync){
-            if (sync->state != SYNC_FAILED && sync->fsfp)
+            // Make sure that the remote synced folder still exists
+            if (!sync->localroot->node)
+            {
+                LOG_err << "The remote root node doesn't exist";
+                sync->changestate(SYNC_FAILED, REMOTE_NODE_NOT_FOUND, false, true);
+            }
+            // Verify fingerprints.
+            else if (sync->state != SYNC_FAILED && sync->fsfp)
             {
                 fsfp_t current = sync->dirnotify->fsfingerprint();
                 if (sync->fsfp != current)
@@ -2686,9 +2693,8 @@ void MegaClient::exec()
                 if (!syncadding && (syncactivity || syncops))
                 {
                     syncs.forEachRunningSync([&](Sync* sync) {
-
                         // make sure that the remote synced folder still exists
-                        if (!sync->localroot->node && sync->state != SYNC_FAILED)
+                        if (!sync->localroot->node)
                         {
                             LOG_err << "The remote root node doesn't exist";
                             sync->changestate(SYNC_FAILED, REMOTE_NODE_NOT_FOUND, false, true);
